@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>3D章章币 · Zhangzhang Coin</title>
+<style>
+  :root { --ink:#f4d9c6; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; }
+  body {
+    background:
+      radial-gradient(120% 90% at 50% 42%, #221b22 0%, #161214 42%, #0f0d10 78%, #0a090b 100%);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    color: var(--ink);
+    -webkit-tap-highlight-color: transparent;
+  }
+  #app { position:fixed; inset:0; }
+  canvas { display:block; touch-action:none; }
+
+  /* faint pink-gold ambient glow behind the coin */
+  #glow {
+    position:fixed; left:50%; top:50%; width:70vmin; height:70vmin;
+    transform:translate(-50%,-46%);
+    background: radial-gradient(circle, rgba(244,200,170,0.16) 0%, rgba(214,140,170,0.07) 38%, rgba(0,0,0,0) 68%);
+    filter: blur(6px); pointer-events:none; z-index:0;
+  }
+
+  .ui { position:fixed; z-index:5; pointer-events:none; user-select:none; }
+  .brand {
+    top:22px; left:26px; letter-spacing:.22em; font-size:12px; font-weight:600;
+    color: rgba(244,217,198,0.72); text-transform:uppercase;
+  }
+  .brand b { color:#f6d4be; font-weight:700; }
+  .hint {
+    bottom:20px; left:50%; transform:translateX(-50%);
+    font-size:11px; letter-spacing:.14em; color: rgba(244,217,198,0.40);
+    text-align:center; white-space:nowrap;
+  }
+  .hint span { margin:0 6px; }
+  .corner {
+    bottom:20px; right:24px; font-size:10px; letter-spacing:.18em;
+    color: rgba(244,217,198,0.30);
+  }
+  @media (max-width: 560px){
+    .brand{ top:16px; left:16px; font-size:10px; }
+    .hint{ font-size:10px; } .hint span{ margin:0 4px; }
+    .corner{ display:none; }
+  }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.168.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.168.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="glow"></div>
+  <div id="app"></div>
+  <div class="ui brand"><b>章章币</b> &nbsp;·&nbsp; ZHANGZHANG&nbsp;COIN</div>
+  <div class="ui hint"><span>拖拽旋转</span>·<span>滚轮缩放</span>·<span>点击抖动</span></div>
+  <div class="ui corner">∞ ZZC</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+/* ============================================================
+   章章币 · Zhangzhang Coin
+   纯程序化几何体 + 粉金果冻质感 + 三点布光 + 环境反射 + Bloom
+   ============================================================ */
+
+// 猫猫章鱼砹酱 SVG 插画（viewBox 360×320）
+// z-order: 触手(底) → 猫耳 → 头身(覆盖耳座/触手根) → 果冻高光 → 面部细节
+// 方向：猫耳朝上、触手朝下、双眼水平——贴合币正面凹盘时图像正立
+const CAT_OCTOPUS_SVG = `<svg viewBox="0 0 360 320" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <!-- 身体柔嫩纯净粉色渐变 -->
+          <linearGradient id="bodySkin" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#ffd5df" />
+            <stop offset="65%" stop-color="#ffb6c7" />
+            <stop offset="100%" stop-color="#ffa5ba" />
+          </linearGradient>
+
+          <!-- 触手渐变（尖端更嫩滑透润） -->
+          <linearGradient id="tentacleSkin" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#ffb0c2" />
+            <stop offset="100%" stop-color="#ff8fa8" />
+          </linearGradient>
+
+          <!-- 柔焦晕染大腮红 -->
+          <radialGradient id="softBlush" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#ff3b6c" stop-opacity="0.38" />
+            <stop offset="100%" stop-color="#ff3b6c" stop-opacity="0" />
+          </radialGradient>
+
+          <!-- 精致微高光 -->
+          <linearGradient id="headLight" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#ffffff" stop-opacity="0.5" />
+            <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+          </linearGradient>
+        </defs>
+
+        <!-- ==================== 1. 底层触手（更迷你一丢丢·圆润肉丸子小触角） ==================== -->
+        <!-- 提示：语酱若想全局继续微调触手大小，可直接在下面的 g 标签加 transform，如 style="transform-origin: 180px 230px; transform: scale(0.95);" -->
+        <g id="tentacles">
+          <!-- 最外侧对称小触手 (左4 & 右4) -->
+          <path d="M 78 220 C 44 222 36 242 54 254 C 74 268 102 252 112 235 Z"
+                fill="url(#tentacleSkin)" stroke="#cc5875" stroke-width="3" stroke-linejoin="round" />
+          <path d="M 282 220 C 316 222 324 242 306 254 C 286 268 258 252 248 235 Z"
+                fill="url(#tentacleSkin)" stroke="#cc5875" stroke-width="3" stroke-linejoin="round" />
+
+          <!-- 次外侧对称小触手 (左3 & 右3) -->
+          <path d="M 108 234 C 86 248 90 272 114 275 C 136 277 148 260 142 240 Z"
+                fill="url(#tentacleSkin)" stroke="#cc5875" stroke-width="3" stroke-linejoin="round" />
+          <path d="M 252 234 C 274 248 270 272 246 275 C 224 277 212 260 218 240 Z"
+                fill="url(#tentacleSkin)" stroke="#cc5875" stroke-width="3" stroke-linejoin="round" />
+
+          <!-- 正前方中间对称迷你肉丸触手 (左2 & 右2) -->
+          <path d="M 142 242 C 134 262 150 282 168 282 C 178 282 182 270 179 246 Z"
+                fill="url(#tentacleSkin)" stroke="#cc5875" stroke-width="3" stroke-linejoin="round" />
+          <path d="M 218 242 C 226 262 210 282 192 282 C 182 282 178 270 181 246 Z"
+                fill="url(#tentacleSkin)" stroke="#cc5875" stroke-width="3" stroke-linejoin="round" />
+        </g>
+
+                <!-- ==================== 2. 猫猫妙脆角（语酱调校神作·特大号饱满灵动猫耳） ==================== -->
+        <g id="cat-ears">
+          <!-- 左耳：整体等比放大，顶点更高更饱满微外展，肉嘟嘟大妙脆角 -->
+          <path d="M 108 156 C 84 130 88 80 118 58 C 146 78 158 118 160 148 Z"
+                fill="url(#bodySkin)" stroke="#cc5875" stroke-width="3.6" stroke-linejoin="round" />
+          <!-- 左耳内粉 -->
+          <path d="M 118 144 C 98 122 102 90 120 74 C 138 92 148 120 150 140 Z"
+                fill="#ff9ab2" opacity="0.5" />
+
+          <!-- 右耳：严格对称特大号妙脆角 -->
+          <path d="M 252 156 C 276 130 272 80 242 58 C 214 78 202 118 200 148 Z"
+                fill="url(#bodySkin)" stroke="#cc5875" stroke-width="3.6" stroke-linejoin="round" />
+          <!-- 右耳内粉 -->
+          <path d="M 242 144 C 262 122 258 90 240 74 C 222 92 212 120 210 140 Z"
+                fill="#ff9ab2" opacity="0.5" />
+        </g>
+
+        <!-- ==================== 3. 肥美大福头身（饱满圆润、鼓鼓的包子脸颊） ==================== -->
+        <g id="head-body">
+          <!-- 干净对称的鼓鼓胖脸曲线 -->
+          <path d="M 92 135 
+                   C 62 168 60 214 96 236 
+                   C 132 254 228 254 264 236 
+                   C 300 214 298 168 268 135 
+                   C 238 102 122 102 92 135 Z"
+                fill="url(#bodySkin)" stroke="#cc5875" stroke-width="3.5" stroke-linejoin="round" />
+
+          <!-- 额头干净反光 -->
+          <ellipse cx="180" cy="126" rx="54" ry="16" fill="url(#headLight)" />
+        </g>
+
+        <!-- ==================== 4. 面部精致五官与手绘还原（整体下移·超级幼态比例） ==================== -->
+        <g id="face-details">
+          <!-- 左右对称的大面积微醺红晕（下移） -->
+          <ellipse cx="114" cy="214" rx="28" ry="17" fill="url(#softBlush)" />
+          <ellipse cx="246" cy="214" rx="28" ry="17" fill="url(#softBlush)" />
+
+          <!-- 语酱钦定：超大超肥美迷糊圈圈腮红 ๑（下移居中） -->
+          <text x="110" y="218" text-anchor="middle" dominant-baseline="middle" font-size="52" font-weight="900" fill="#d63f68" font-family="system-ui, -apple-system, sans-serif" style="user-select: none;">๑</text>
+          <text x="250" y="218" text-anchor="middle" dominant-baseline="middle" font-size="52" font-weight="900" fill="#d63f68" font-family="system-ui, -apple-system, sans-serif" style="user-select: none;">๑</text>
+
+          <!-- 标志性豆豆眉（往正中间聚拢·呆呆委屈感） -->
+          <circle cx="154" cy="162" r="6.5" fill="#cc3d64" />
+          <circle cx="206" cy="162" r="6.5" fill="#cc3d64" />
+
+          <!-- 超萌幼态大圆眼（下移至 y:194） -->
+          <!-- 左眼 -->
+          <circle cx="138" cy="194" r="16.5" fill="#ffffff" stroke="#5c1524" stroke-width="3.2" />
+          <circle cx="139" cy="194" r="8.8" fill="#5c1524" />
+          <circle cx="136" cy="190" r="3.2" fill="#ffffff" />
+          <circle cx="142" cy="197" r="1.5" fill="#ffffff" />
+
+          <!-- 右眼 -->
+          <circle cx="222" cy="194" r="16.5" fill="#ffffff" stroke="#5c1524" stroke-width="3.2" />
+          <circle cx="221" cy="194" r="8.8" fill="#5c1524" />
+          <circle cx="218" cy="190" r="3.2" fill="#ffffff" />
+          <circle cx="224" cy="197" r="1.5" fill="#ffffff" />
+
+          <!-- 猫猫小嘴巴 ω（下移） -->
+          <path d="M 168 209 Q 174 217 180 211 Q 186 217 192 209"
+                fill="none" stroke="#5c1524" stroke-width="3" stroke-linecap="round" />
+        </g>
+      </svg>`;
+
+const R  = 1.00;     // 硬币外半径
+const H  = 0.24;     // 厚度
+const h  = H / 2;    // 半厚
+const re = 0.075;    // 边缘倒角半径
+const faceR = R - re;// 平面币面半径
+
+// ---------- 渲染器 ----------
+const container = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x000000, 0);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.88;
+container.appendChild(renderer.domElement);
+
+// ---------- 场景 / 相机 ----------
+const scene = new THREE.Scene();
+scene.background = null;
+
+const camera = new THREE.PerspectiveCamera(32, window.innerWidth/window.innerHeight, 0.1, 100);
+camera.position.set(0, 0.35, 3.7);
+
+// ---------- 环境反射贴图（PMREM + RoomEnvironment） ----------
+const pmrem = new THREE.PMREMGenerator(renderer);
+const envScene = new RoomEnvironment();
+const envMap = pmrem.fromScene(envScene, 0.04).texture;
+scene.environment = envMap;
+scene.environmentIntensity = 0.85;
+envScene.dispose && envScene.dispose();
+
+// ---------- 三点布光 ----------
+// 主光：暖白 key（前上左）
+const keyLight = new THREE.DirectionalLight(0xfff0e2, 1.7);
+keyLight.position.set(3.2, 4.0, 4.6);
+scene.add(keyLight);
+// 辅光：冷紫粉 fill（前下右）
+const fillLight = new THREE.DirectionalLight(0xc9a4ff, 0.95);
+fillLight.position.set(-4.0, -0.4, 3.0);
+scene.add(fillLight);
+// 侧逆轮廓光 Rim：强暖粉白（后上方），勾勒吸盘齿轮高光
+const rimLight = new THREE.DirectionalLight(0xffe0ec, 1.9);
+rimLight.position.set(-1.2, 2.6, -5.5);
+scene.add(rimLight);
+// 半球光：柔和顶/底补色
+const hemi = new THREE.HemisphereLight(0xffe9f0, 0x1a1014, 0.42);
+scene.add(hemi);
+// 一点低位冷紫环境光，强化粉金流转
+scene.add(new THREE.AmbientLight(0x2a2230, 0.5));
+
+// ---------- 材质 ----------
+// 主币身：玫瑰香槟金 / 浅肉粉流金
+const goldMat = new THREE.MeshPhysicalMaterial({
+  color: 0xf6d4be, metalness: 0.84, roughness: 0.19,
+  clearcoat: 0.62, clearcoatRoughness: 0.22,
+  envMapIntensity: 0.95, reflectivity: 0.5
+});
+// 章鱼本体：粉果冻（清漆 + 微透 + sheen + 微弱发光拟 SSS）
+const jellyMat = new THREE.MeshPhysicalMaterial({
+  color: 0xffc4d6, metalness: 0.0, roughness: 0.26,
+  clearcoat: 0.95, clearcoatRoughness: 0.12,
+  transmission: 0.16, thickness: 0.5, ior: 1.42,
+  sheen: 1.0, sheenColor: 0xffd6e6, sheenRoughness: 0.28,
+  envMapIntensity: 1.1, emissive: 0x5a1f33, emissiveIntensity: 0.55
+});
+// 触手：略深粉果冻
+const tentacleMat = new THREE.MeshPhysicalMaterial({
+  color: 0xffb6c8, metalness: 0.0, roughness: 0.30,
+  clearcoat: 0.85, clearcoatRoughness: 0.18,
+  transmission: 0.12, thickness: 0.35, ior: 1.4,
+  sheen: 0.8, sheenColor: 0xffc8dc, envMapIntensity: 1.0,
+  emissive: 0x3d1422, emissiveIntensity: 0.4
+});
+// 眼睛：半哑光雾灰
+const eyeMat = new THREE.MeshStandardMaterial({
+  color: 0xb9bcc6, metalness: 0.18, roughness: 0.55, envMapIntensity: 0.85
+});
+const pupilMat = new THREE.MeshStandardMaterial({
+  color: 0x121419, metalness: 0.1, roughness: 0.5
+});
+const eyeShineMat = new THREE.MeshStandardMaterial({
+  color: 0xffffff, metalness: 0.0, roughness: 0.15, emissive: 0xffffff, emissiveIntensity: 0.5
+});
+// 豆豆眉：深肉粉
+const browMat = new THREE.MeshStandardMaterial({
+  color: 0xd8668a, metalness: 0.22, roughness: 0.42, envMapIntensity: 0.9
+});
+// 大红虾：草莓红/珊瑚红微金属
+const shrimpMat = new THREE.MeshPhysicalMaterial({
+  color: 0xff5340, metalness: 0.34, roughness: 0.30,
+  clearcoat: 0.65, clearcoatRoughness: 0.24,
+  sheen: 0.7, sheenColor: 0xffb3a4, envMapIntensity: 1.15,
+  emissive: 0x6e1a10, emissiveIntensity: 0.5
+});
+const shrimpDarkMat = new THREE.MeshStandardMaterial({
+  color: 0xc2311f, metalness: 0.3, roughness: 0.4, envMapIntensity: 0.9
+});
+// 防伪吸盘齿轮：更亮更滑的粉金，专收 Rim 高光
+const cupMat = new THREE.MeshPhysicalMaterial({
+  color: 0xf8d6c2, metalness: 0.88, roughness: 0.20,
+  clearcoat: 0.85, clearcoatRoughness: 0.14, envMapIntensity: 1.6
+});
+// 浮雕文字带：亮金
+const textGoldMat = new THREE.MeshStandardMaterial({
+  color: 0xf3cf86, metalness: 0.92, roughness: 0.30, envMapIntensity: 1.25
+});
+// 装饰刻线环：略暗金
+const lineMat = new THREE.MeshStandardMaterial({
+  color: 0xd6a266, metalness: 0.9, roughness: 0.38, envMapIntensity: 1.0
+});
+// 点点装饰 & ∞ 符号：亮金
+const dotMat = new THREE.MeshStandardMaterial({
+  color: 0xf6d488, metalness: 0.9, roughness: 0.28, envMapIntensity: 1.3
+});
+
+// ---------- 硬币本体（车削轮廓：微圆边 + 微凹币面） ----------
+function buildCoinProfile() {
+  const pts = [];
+  const arc = 12;
+
+  // 底面：中心凹盘 → 外圈凸边平台
+  pts.push(new THREE.Vector2(0.000, -h + 0.045));
+  pts.push(new THREE.Vector2(0.20,  -h + 0.044));
+  pts.push(new THREE.Vector2(0.50,  -h + 0.041));
+  pts.push(new THREE.Vector2(0.80,  -h + 0.034));
+  pts.push(new THREE.Vector2(0.84,  -h + 0.022));
+  pts.push(new THREE.Vector2(0.87,  -h));
+  pts.push(new THREE.Vector2(faceR, -h));
+
+  // 底外缘倒角（不变）
+  const c1 = new THREE.Vector2(faceR, -h + re);
+  for (let i=1;i<=arc;i++){ const a=-Math.PI/2 + (Math.PI/2)*(i/arc);
+    pts.push(new THREE.Vector2(c1.x + re*Math.cos(a), c1.y + re*Math.sin(a))); }
+
+  // 侧面直线（不变）
+  pts.push(new THREE.Vector2(R, h - re));
+
+  // 顶外缘倒角（不变）
+  const c2 = new THREE.Vector2(faceR, h - re);
+  for (let i=1;i<=arc;i++){ const a=(Math.PI/2)*(i/arc);
+    pts.push(new THREE.Vector2(c2.x + re*Math.cos(a), c2.y + re*Math.sin(a))); }
+
+  // 顶面：外圈凸边平台 → 陡降台阶 → 中心凹盘
+  pts.push(new THREE.Vector2(faceR, h));
+  pts.push(new THREE.Vector2(0.87,  h));
+  pts.push(new THREE.Vector2(0.84,  h - 0.022));
+  pts.push(new THREE.Vector2(0.80,  h - 0.034));
+  pts.push(new THREE.Vector2(0.50,  h - 0.041));
+  pts.push(new THREE.Vector2(0.20,  h - 0.044));
+  pts.push(new THREE.Vector2(0.000, h - 0.045));
+
+  return pts;
+}
+const coinBody = new THREE.Mesh(
+  new THREE.LatheGeometry(buildCoinProfile(), 140),
+  goldMat
+);
+coinBody.geometry.computeVertexNormals();
+
+// ---------- 浮雕文字带纹理（凸起金字母） ----------
+function makeRimTextures(str) {
+  const W=2048, Hh=256;
+  // 颜色画布（金渐变）
+  const cc = document.createElement('canvas'); cc.width=W; cc.height=Hh;
+  const cx = cc.getContext('2d'); cx.clearRect(0,0,W,Hh);
+  cx.font = 'bold 92px Georgia, "Times New Roman", serif';
+  cx.textAlign='left'; cx.textBaseline='middle';
+  const grad = cx.createLinearGradient(0,0,0,Hh);
+  grad.addColorStop(0,'#fff4d6'); grad.addColorStop(0.5,'#e9c27a'); grad.addColorStop(1,'#a9782e');
+  let tw = cx.measureText(str).width;
+  let reps = Math.ceil(W/tw)+1;
+  for (let r=0;r<reps;r++){
+    const x = r*tw;
+    cx.fillStyle='rgba(54,26,10,0.55)'; cx.fillText(str, x+3, Hh/2+4);     // 阴影
+    cx.lineWidth=5; cx.strokeStyle='rgba(70,34,12,0.5)'; cx.strokeText(str, x, Hh/2);
+    cx.fillStyle=grad; cx.fillText(str, x, Hh/2);                          // 金字
+    cx.fillStyle='rgba(255,255,255,0.28)'; cx.fillText(str, x, Hh/2-3);     // 高光
+  }
+  const map = new THREE.CanvasTexture(cc); map.colorSpace = THREE.SRGBColorSpace;
+  map.wrapS = THREE.RepeatWrapping; map.anisotropy = 8;
+
+  // alpha/bump 画布（白字黑底）
+  const ac = document.createElement('canvas'); ac.width=W; ac.height=Hh;
+  const ax = ac.getContext('2d'); ax.fillStyle='#000'; ax.fillRect(0,0,W,Hh);
+  ax.fillStyle='#fff'; ax.font=cx.font; ax.textAlign='left'; ax.textBaseline='middle';
+  for (let r=0;r<reps;r++){ ax.fillText(str, r*tw, Hh/2); }
+  const alpha = new THREE.CanvasTexture(ac);
+  alpha.wrapS = THREE.RepeatWrapping; alpha.anisotropy = 8;
+  return { map, alpha };
+}
+
+// 极坐标 UV 圆环（u=角度, v=内→外），保证环形文字方向正确
+function makePolarRing(innerR, outerR, segs=240) {
+  const g = new THREE.RingGeometry(innerR, outerR, segs, 1);
+  const pos = g.attributes.position, uv = g.attributes.uv;
+  const v = new THREE.Vector3();
+  for (let i=0;i<pos.count;i++){
+    v.fromBufferAttribute(pos,i);
+    const ang = Math.atan2(v.y, v.x);
+    const u = (ang + Math.PI) / (Math.PI*2);
+    const rad = Math.sqrt(v.x*v.x + v.y*v.y);
+    const w = (rad - innerR) / (outerR - innerR);
+    uv.setXY(i, u, w);
+  }
+  uv.needsUpdate = true;
+  return g;
+}
+
+function makeTextRing(faceFront, str) {
+  const { map, alpha } = makeRimTextures(str);
+  const mat = textGoldMat.clone();
+  mat.map = map; mat.alphaMap = alpha; mat.bumpMap = alpha; mat.bumpScale = 0.012;
+  mat.transparent = false; mat.alphaTest = 0.5;
+  mat.needsUpdate = true;
+  const mesh = new THREE.Mesh(makePolarRing(0.735, 0.885, 256), mat);
+  // 正面法线 +Y（rot.x=-π/2），背面法线 -Y（rot.x=+π/2）
+  mesh.rotation.x = faceFront ? -Math.PI/2 : Math.PI/2;
+  mesh.position.y = faceFront ? (h + 0.004) : -(h + 0.004);
+  return mesh;
+}
+
+// ---------- 猫猫章鱼砹酱正面贴图（SVG → Canvas → CanvasTexture） ----------
+function makeCatFaceTexture() {
+  return new Promise((resolve) => {
+    const blob = new Blob([CAT_OCTOPUS_SVG], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      console.log('[FACE TEX] SVG loaded, size =', img.width, img.height);
+      const S = 1024;
+      const c = document.createElement('canvas');
+      c.width = c.height = S;
+      const ctx = c.getContext('2d');
+      ctx.clearRect(0, 0, S, S);
+      const svgAspect = 360 / 320;
+      let dw, dh;
+      if (svgAspect >= 1) { dw = S; dh = S / svgAspect; }
+      else { dh = S; dw = S * svgAspect; }
+      ctx.drawImage(img, (S - dw) / 2, (S - dh) / 2, dw, dh);
+      URL.revokeObjectURL(url);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = 8;
+      console.log('[FACE TEX] canvas drawn, tex size =', S, S);
+      resolve(tex);
+    };
+    img.onerror = (e) => {
+      console.error('[FACE TEX] SVG load FAILED', e);
+      resolve(null);
+    };
+    img.src = url;
+  });
+}
+
+// ---------- 正面凹盘几何体（贴合币正面凹盘深度的自定义圆盘） ----------
+function buildFaceDisc(maxR = 0.80, rings = 24, segs = 64) {
+  // 与币正面凹盘匹配的深度函数：中心 -0.045，r=0.80 处 -0.034
+  function depth(r) {
+    const t = Math.min(r / 0.80, 1);
+    return 0.045 - 0.011 * t * t;
+  }
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+  // 中心顶点
+  positions.push(0, -depth(0), 0);
+  uvs.push(0.5, 0.5);
+  // 逐环
+  for (let i = 1; i <= rings; i++) {
+    const t = i / rings;
+    const r = t * maxR;
+    const d = depth(r);
+    for (let j = 0; j < segs; j++) {
+      const a = (j / segs) * Math.PI * 2;
+      positions.push(Math.cos(a) * r, -d, Math.sin(a) * r);
+      // u 沿币面 +X，v 沿币面 -Z（保证从正面看图像正立）
+      uvs.push(0.5 + Math.cos(a) * t * 0.5, 0.5 - Math.sin(a) * t * 0.5);
+    }
+  }
+  // 中心扇面
+  for (let j = 0; j < segs; j++) {
+    indices.push(0, 1 + ((j + 1) % segs), 1 + j);
+  }
+  // 环与环之间
+  for (let i = 0; i < rings - 1; i++) {
+    const base = 1 + i * segs;
+    const nextBase = 1 + (i + 1) * segs;
+    for (let j = 0; j < segs; j++) {
+      const jn = (j + 1) % segs;
+      indices.push(base + j, nextBase + j, nextBase + jn);
+      indices.push(base + j, nextBase + jn, base + jn);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+// ---------- 正面浮雕：章章脸 ----------
+function buildFrontFace() {
+  const g = new THREE.Group();
+
+  // 章鱼宽扁大饼脸（横向加宽、纵向压扁、前后收薄，果冻粉）
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.345, 48, 36), jellyMat);
+  head.scale.set(1.25, 0.56, 0.68);
+  head.position.set(0, h, -0.01);
+  g.add(head);
+
+  // 两只圆润胖猫耳（扁球，下移贴头皮，微微朝外倾斜）
+  const earGeo = new THREE.SphereGeometry(0.115, 32, 24);
+  const earL = new THREE.Mesh(earGeo, jellyMat);
+  earL.scale.set(1.1, 0.85, 0.6);
+  earL.position.set(-0.20, h + 0.22, -0.02);
+  earL.rotation.z = 0.3; earL.rotation.x = -0.05;
+  g.add(earL);
+  const earR = new THREE.Mesh(earGeo, jellyMat);
+  earR.scale.set(1.1, 0.85, 0.6);
+  earR.position.set(0.20, h + 0.22, -0.02);
+  earR.rotation.z = -0.3; earR.rotation.x = -0.05;
+  g.add(earR);
+
+  // 两颗平贴大圆点眼（黑圈眼白 + 黑瞳 + 白高光点）
+  const eyeGeo = new THREE.SphereGeometry(0.075, 28, 22);
+  const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+  eyeL.scale.set(1, 1, 0.12);
+  eyeL.position.set(-0.145, h + 0.02, 0.235);
+  g.add(eyeL);
+  const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+  eyeR.scale.set(1, 1, 0.12);
+  eyeR.position.set(0.145, h + 0.02, 0.235);
+  g.add(eyeR);
+  // 瞳孔（贴在眼面上） + 高光点
+  const pupGeo = new THREE.SphereGeometry(0.035, 20, 16);
+  const pupL = new THREE.Mesh(pupGeo, pupilMat);
+  pupL.scale.set(1, 1, 0.1);
+  pupL.position.set(-0.145, h + 0.02, 0.245);
+  g.add(pupL);
+  const pupR = new THREE.Mesh(pupGeo, pupilMat);
+  pupR.scale.set(1, 1, 0.1);
+  pupR.position.set(0.145, h + 0.02, 0.245);
+  g.add(pupR);
+  const shGeo = new THREE.SphereGeometry(0.014, 12, 10);
+  const shL = new THREE.Mesh(shGeo, eyeShineMat);
+  shL.scale.set(1, 1, 0.1);
+  shL.position.set(-0.128, h + 0.035, 0.252);
+  g.add(shL);
+  const shR = new THREE.Mesh(shGeo, eyeShineMat);
+  shR.scale.set(1, 1, 0.1);
+  shR.position.set(0.162, h + 0.035, 0.252);
+  g.add(shR);
+
+  // w 形小嘴（曲线管，黑色）
+  const mouthCurvePts = [
+    new THREE.Vector3(-0.06, h - 0.05, 0.238),
+    new THREE.Vector3(-0.03, h - 0.07, 0.245),
+    new THREE.Vector3( 0.00, h - 0.05, 0.248),
+    new THREE.Vector3( 0.03, h - 0.07, 0.245),
+    new THREE.Vector3( 0.06, h - 0.05, 0.238),
+  ];
+  const mouthCurve = new THREE.CatmullRomCurve3(mouthCurvePts);
+  const mouthMat = new THREE.MeshStandardMaterial({ color: 0x3a1a22, roughness: 0.8 });
+  const mouth = new THREE.Mesh(new THREE.TubeGeometry(mouthCurve, 16, 0.012, 8, false), mouthMat);
+  g.add(mouth);
+
+  // 脸颊两侧腮红斜须（深粉，三根斜线）
+  const blushMat = new THREE.MeshStandardMaterial({ color: 0xd85a6a, roughness: 0.6, metalness: 0.1 });
+  const lineGeo = new THREE.BoxGeometry(0.05, 0.012, 0.01);
+  // 左侧三根
+  [0.0, 0.025, 0.05].forEach((offset, i)=>{
+    const line = new THREE.Mesh(lineGeo, blushMat);
+    line.position.set(-0.20, h - 0.06 + offset*0.3, 0.23);
+    line.rotation.z = 0.7;
+    g.add(line);
+  });
+  // 右侧三根
+  [0.0, 0.025, 0.05].forEach((offset, i)=>{
+    const line = new THREE.Mesh(lineGeo, blushMat);
+    line.position.set(0.20, h - 0.06 + offset*0.3, 0.23);
+    line.rotation.z = -0.7;
+    g.add(line);
+  });
+
+  // 底部小触手（圆管，向两侧微卷）
+  const tentacles = [
+    [[0.00,h,0.22],[-0.08,h-0.02,0.30],[-0.18,h,0.33],[-0.27,h+0.07,0.30],[-0.30,h+0.14,0.22]],
+    [[0.00,h,0.24],[-0.06,h-0.01,0.32],[-0.12,h+0.04,0.34],[-0.16,h+0.11,0.30]],
+    [[0.00,h,0.26],[0.00,h-0.01,0.34],[0.00,h+0.05,0.38],[0.00,h+0.12,0.36]],
+    [[0.00,h,0.24],[0.06,h-0.01,0.32],[0.12,h+0.04,0.34],[0.16,h+0.11,0.30]],
+    [[0.00,h,0.22],[0.08,h-0.02,0.30],[0.18,h,0.33],[0.27,h+0.07,0.30],[0.30,h+0.14,0.22]],
+  ];
+  tentacles.forEach(pts=>{
+    const curve = new THREE.CatmullRomCurve3(pts.map(p=>new THREE.Vector3(...p)));
+    const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 28, 0.048, 12, false), tentacleMat);
+    g.add(tube);
+  });
+
+  return g;
+}
+
+// ---------- 背面浮雕：大红虾 + 点点 + ∞ ----------
+function buildBackFace() {
+  const g = new THREE.Group();
+  const Y = -h; // 背面 y
+
+  // 虾身曲线（头朝 -Z 上，尾朝 +Z 下，侧弯）
+  const curvePts = [
+    [0.06, Y, -0.24],
+    [-0.02, Y, -0.16],
+    [-0.10, Y, -0.06],
+    [-0.125, Y, 0.04],
+    [-0.07, Y, 0.13],
+    [0.04, Y, 0.18],
+    [0.12, Y, 0.16],
+  ].map(p=>new THREE.Vector3(...p));
+  const curve = new THREE.CatmullRomCurve3(curvePts, false, 'catmullrom', 0.5);
+  const radii = [0.105, 0.098, 0.088, 0.074, 0.058, 0.044, 0.030];
+  // 沿曲线放球，半径递减（分段珠状虾身）
+  const beadGeo = new THREE.SphereGeometry(1, 20, 16);
+  const N = 26;
+  for (let i=0;i<N;i++){
+    const t = i/(N-1);
+    const p = curve.getPoint(t);
+    const seg = t*(radii.length-1);
+    const idx = Math.min(radii.length-2, Math.floor(seg));
+    const fr = seg - idx;
+    const r = THREE.MathUtils.lerp(radii[idx], radii[idx+1], fr);
+    const m = new THREE.Mesh(beadGeo, i<2 ? shrimpDarkMat : shrimpMat);
+    m.position.copy(p);
+    m.scale.setScalar(r);
+    g.add(m);
+  }
+  // 头部小眼
+  const headP = curve.getPoint(0);
+  const eGeo = new THREE.SphereGeometry(0.02, 14, 12);
+  const e1 = new THREE.Mesh(eGeo, pupilMat); e1.position.set(headP.x-0.035, Y, headP.z-0.045); g.add(e1);
+  const e2 = new THREE.Mesh(eGeo, pupilMat); e2.position.set(headP.x+0.005, Y, headP.z-0.05); g.add(e2);
+  // 两根触须（细锥）
+  const antGeo = new THREE.ConeGeometry(0.014, 0.16, 12);
+  const a1 = new THREE.Mesh(antGeo, shrimpDarkMat);
+  a1.position.set(headP.x-0.03, Y, headP.z-0.13);
+  a1.rotation.x = Math.PI/2; a1.rotation.z = 0.3;
+  g.add(a1);
+  const a2 = new THREE.Mesh(antGeo, shrimpDarkMat);
+  a2.position.set(headP.x+0.03, Y, headP.z-0.12);
+  a2.rotation.x = Math.PI/2; a2.rotation.z = -0.35;
+  g.add(a2);
+  // 尾扇（扁平锥 + 两侧鳍）
+  const tailP = curve.getPoint(1);
+  const fan = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.085, 18), shrimpMat);
+  fan.scale.set(1, 0.32, 1);
+  fan.position.set(tailP.x+0.05, Y, tailP.z+0.04);
+  fan.rotation.x = Math.PI/2; fan.rotation.z = -0.5;
+  g.add(fan);
+  const finGeo = new THREE.ConeGeometry(0.035, 0.09, 12);
+  const f1 = new THREE.Mesh(finGeo, shrimpDarkMat);
+  f1.scale.set(1,0.35,1); f1.position.set(tailP.x+0.10, Y, tailP.z+0.065);
+  f1.rotation.x=Math.PI/2; f1.rotation.z=-0.2; g.add(f1);
+  const f2 = new THREE.Mesh(finGeo, shrimpDarkMat);
+  f2.scale.set(1,0.35,1); f2.position.set(tailP.x+0.02, Y, tailP.z+0.075);
+  f2.rotation.x=Math.PI/2; f2.rotation.z=0.7; g.add(f2);
+
+  // 环绕圆弧小点点缀
+  const dotGeo = new THREE.SphereGeometry(0.023, 14, 12);
+  for (let i=0;i<16;i++){
+    const a = (i/16)*Math.PI*2;
+    const rr = 0.55 + 0.015*Math.sin(i*1.7);
+    const d = new THREE.Mesh(dotGeo, dotMat);
+    d.position.set(Math.cos(a)*rr, Y - 0.004, Math.sin(a)*rr);
+    g.add(d);
+  }
+
+  // 3D 浮雕 ∞ 符号（两个相切金环）
+  const tor = new THREE.TorusGeometry(0.05, 0.017, 18, 40);
+  const inf1 = new THREE.Mesh(tor, dotMat);
+  inf1.rotation.x = Math.PI/2;
+  inf1.position.set(-0.06, Y - 0.01, -0.34);
+  g.add(inf1);
+  const inf2 = new THREE.Mesh(tor, dotMat);
+  inf2.rotation.x = Math.PI/2;
+  inf2.position.set(0.06, Y - 0.01, -0.34);
+  g.add(inf2);
+
+  return g;
+}
+
+// ---------- 防伪齿轮吸盘（外圈 8 颗车削吸盘：外圈隆起 + 中心凹坑） ----------
+function buildSuctionCups() {
+  const g = new THREE.Group();
+
+  // 吸盘剖面（局部坐标 x=径向半径, y=轴向高度，绕 Y 轴车削）
+  // 由底心 → 外缘 → 隆起 → 中心凹坑底，形成"中间凹、外圈鼓"的吸盘形
+  const pts = [
+    new THREE.Vector2(0.000, -0.058),  // 底心（嵌入币身）
+    new THREE.Vector2(0.060, -0.058),
+    new THREE.Vector2(0.092, -0.045),
+    new THREE.Vector2(0.100, -0.015),
+    new THREE.Vector2(0.098,  0.015),  // 外缘
+    new THREE.Vector2(0.090,  0.040),
+    new THREE.Vector2(0.075,  0.052),  // 隆起最高处
+    new THREE.Vector2(0.052,  0.042),
+    new THREE.Vector2(0.028,  0.024),
+    new THREE.Vector2(0.000,  0.018),  // 中心凹坑底
+  ];
+  const cupGeo = new THREE.LatheGeometry(pts, 40);
+  cupGeo.computeVertexNormals();
+
+  const n = 8;
+  const inset = R - 0.01;                 // 基准圆往内收 0.01，收敛凸出量
+  const up = new THREE.Vector3(0, 1, 0);
+
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    const dir = new THREE.Vector3(Math.cos(a), 0, Math.sin(a));
+    const m = new THREE.Mesh(cupGeo, cupMat);
+    m.position.copy(dir).multiplyScalar(inset);
+    m.quaternion.setFromUnitVectors(up, dir);   // 吸盘轴对齐到径向
+    g.add(m);
+  }
+  return g;
+}
+
+// ---------- 装饰刻线环 ----------
+function buildLineRing(front) {
+  const tor = new THREE.Mesh(
+    new THREE.TorusGeometry(0.715, 0.006, 12, 160),
+    lineMat
+  );
+  tor.rotation.x = front ? -Math.PI/2 : Math.PI/2;
+  tor.position.y = front ? (h+0.004) : -(h+0.004);
+  return tor;
+}
+function buildOuterLineRing(front) {
+  const tor = new THREE.Mesh(
+    new THREE.TorusGeometry(0.905, 0.0045, 10, 180),
+    lineMat
+  );
+  tor.rotation.x = front ? -Math.PI/2 : Math.PI/2;
+  tor.position.y = front ? (h+0.004) : -(h+0.004);
+  return tor;
+}
+
+// ---------- 组装硬币（局部 Y 轴朝上；之后整体绕 X 转 π/2 使轴沿 Z） ----------
+const coin = new THREE.Group();
+coin.add(coinBody);
+coin.add(buildSuctionCups());
+// coin.add(buildFrontFace());   // 素币：移除正面章鱼脸（函数定义保留，日后可恢复）
+// coin.add(buildBackFace());    // 素币：移除背面大红虾（函数定义保留，日后可恢复）
+// coin.add(makeTextRing(true,  ' ★ ZHANGZHANG COIN ★ ZZC ★ ∞ ★ '));  // 素面币：移除正面文字金环
+// coin.add(makeTextRing(false, ' ★ ZHANGZHANG COIN ★ ZZC ★ ∞ ★ ')); // 素面币：移除背面文字金环
+// coin.add(buildLineRing(true));      // 素面币：移除正面内圈刻线
+// coin.add(buildLineRing(false));     // 素面币：移除背面内圈刻线
+// coin.add(buildOuterLineRing(true)); // 素面币：移除正面外圈刻线
+// coin.add(buildOuterLineRing(false));// 素面币：移除背面外圈刻线
+
+    // 异步加载猫猫章鱼砹酱正面贴图，贴在币正面凹盘
+    makeCatFaceTexture().then(tex => {
+      if (!tex) { console.warn('[FACE] 贴图未生成，跳过'); return; }
+      const faceGeo = buildFaceDisc(0.80, 24, 64);
+      const faceMat = new THREE.MeshStandardMaterial({
+        map: tex,
+        transparent: true,
+        roughness: 0.58,
+        metalness: 0.04,
+        envMapIntensity: 0.6,
+        side: THREE.DoubleSide,
+        alphaTest: 0.05,
+      });
+      const faceMesh = new THREE.Mesh(faceGeo, faceMat);
+      faceMesh.position.set(0, h + 0.004, 0);   // 上抬 0.004，贴图盘浮出凹盘
+      coin.add(faceMesh);
+    });
+
+coin.rotation.x = Math.PI/2;   // 正面(+Y) -> 朝相机(+Z)，背面(-Y) -> -Z
+
+// ---------- 层级组：悬浮 / 悬停倾斜+Q弹 / 自转 / 朝向 ----------
+const floatGroup = new THREE.Group(); scene.add(floatGroup);
+const tiltGroup  = new THREE.Group(); floatGroup.add(tiltGroup);
+const spinGroup  = new THREE.Group(); tiltGroup.add(spinGroup);
+spinGroup.add(coin);
+
+// ---------- OrbitControls ----------
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.enablePan = false;
+controls.rotateSpeed = 0.85;
+controls.zoomSpeed = 0.8;
+controls.minDistance = 2.4;
+controls.maxDistance = 7.0;
+controls.minPolarAngle = 0.22;
+controls.maxPolarAngle = Math.PI - 0.22;
+controls.target.set(0, 0, 0);
+
+// ---------- 后处理 Bloom ----------
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight), 0.32, 0.55, 0.9
+);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+// ---------- 交互：悬停倾斜 + 点击 Q 弹 ----------
+const tilt = { x:0, z:0, tx:0, tz:0 };     // 目标 / 当前
+let bounceT = -1;                            // Q弹计时（-1 未触发）
+function triggerBounce(){ bounceT = 0; }
+
+const dom = renderer.domElement;
+dom.addEventListener('pointermove', (e)=>{
+  if (e.pointerType && e.pointerType !== 'mouse') return;
+  const nx = (e.clientX / window.innerWidth) * 2 - 1;
+  const ny = (e.clientY / window.innerHeight) * 2 - 1;
+  tilt.tx = ny * 0.28;
+  tilt.tz = -nx * 0.28;
+});
+dom.addEventListener('pointerdown', (e)=>{
+  if (e.pointerType === 'touch') { tilt.tx = 0; tilt.tz = 0; }
+  triggerBounce();
+});
+// 离开窗口时回正
+window.addEventListener('pointerleave', ()=>{ tilt.tx = 0; tilt.tz = 0; });
+
+// ---------- 动画循环 ----------
+const clock = new THREE.Clock();
+function animate() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+
+  // Sine 呼吸悬浮（自转已停用，保留悬浮 + 拖拽 + 点击抖动）
+  // spinGroup.rotation.y += dt * 0.5;
+  floatGroup.position.y = Math.sin(t * 1.15) * 0.06;
+
+  // 悬停倾斜（平滑跟随指针）
+  tilt.x += (tilt.tx - tilt.x) * 0.08;
+  tilt.z += (tilt.tz - tilt.z) * 0.08;
+  tiltGroup.rotation.x = tilt.x;
+  tiltGroup.rotation.z = tilt.z;
+
+  // Q弹果冻抖动：阻尼余弦，纵向压缩 / 横向拉伸
+  if (bounceT >= 0) {
+    bounceT += dt;
+    const s = 0.16 * Math.exp(-3.4 * bounceT) * Math.cos(13 * bounceT);
+    tiltGroup.scale.set(1 + s, 1 - s * 1.25, 1 + s);
+    if (bounceT > 1.6) { bounceT = -1; tiltGroup.scale.set(1,1,1); }
+  }
+
+  controls.update();
+  composer.render();
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+
+// ---------- 自适应 ----------
+function onResize() {
+  const w = window.innerWidth, hgt = window.innerHeight;
+  camera.aspect = w / hgt;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, hgt);
+  composer.setSize(w, hgt);
+  bloom.setSize(w, hgt);
+}
+window.addEventListener('resize', onResize);
+window.addEventListener('orientationchange', onResize);
+</script>
+</body>
+</html>
